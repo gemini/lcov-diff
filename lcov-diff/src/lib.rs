@@ -1,6 +1,6 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-
+use std::fmt::Debug;
 use lcov::Report;
 
 use lcov::report::MergeError;
@@ -10,25 +10,43 @@ use lcov::report::section::function::Value as FunctionValue;
 use lcov::report::section::line::Value as LineValue;
 use lcov::report::section::Value as SectionValue;
 
-pub fn diff_reports(first: &Report, second: &Report) -> Result<Report, MergeError> {
+#[derive(Clone, Copy)]
+pub struct IgnoreError {
+    pub ignore_unmatched_line_error: bool,
+}
+
+pub struct PostProcessOptions {
+    pub drop_zeros: bool,
+}
+
+pub fn diff_reports(first: &Report, second: &Report, ignore: IgnoreError, post_process_options: PostProcessOptions) -> Result<Report, MergeError> {
     let mut rep = Report::new();
     rep.merge(first.to_owned())?;
-    rep.diff(second)?;
+    rep.diff(second, ignore)?;
+    if post_process_options.drop_zeros {
+        // Drop sections where there is not at least one branch, function, or line with count > 0
+        rep.sections
+            .retain(|x, v|
+                v.branches.iter().map(|(_, v)| v).filter(|v| v.taken.is_some()).count() > 0
+                    || v.functions.iter().map(|(_, v)| v).filter(|v| v.count > 0).count() > 0
+                    || v.lines.iter().map(|(_, v)| v).filter(|v| v.count > 0).count() > 0
+            );
+    }
     Ok(rep)
 }
 
 pub trait Diff {
-    fn diff(&mut self, other: &Self) -> Result<(), MergeError>;
+    fn diff(&mut self, other: &Self, ignore: IgnoreError) -> Result<(), MergeError>;
 }
 
 impl Diff for Report {
-    fn diff(&mut self, other: &Self) -> Result<(), MergeError> {
-        self.sections.diff(&other.sections)
+    fn diff(&mut self, other: &Self, ignore: IgnoreError) -> Result<(), MergeError> {
+        self.sections.diff(&other.sections, ignore)
     }
 }
 
 impl Diff for BranchValue {
-    fn diff(&mut self, other: &Self) -> Result<(), MergeError> {
+    fn diff(&mut self, other: &Self, ignore: IgnoreError) -> Result<(), MergeError> {
         if let BranchValue { taken: Some(taken) } = *other {
             // We don't care about exact count. It's only important is the branch covered or not
             if taken > 0 {
@@ -40,20 +58,25 @@ impl Diff for BranchValue {
 }
 
 impl Diff for SectionValue {
-    fn diff(&mut self, other: &Self) -> Result<(), MergeError> {
-        self.functions.diff(&other.functions)?;
-        self.branches.diff(&other.branches)?;
-        self.lines.diff(&other.lines)?;
+    fn diff(&mut self, other: &Self, ignore: IgnoreError) -> Result<(), MergeError> {
+        self.functions.diff(&other.functions, ignore)?;
+        self.branches.diff(&other.branches, ignore)?;
+        self.lines.diff(&other.lines, ignore)?;
         Ok(())
     }
 }
 
 impl Diff for FunctionValue {
-    fn diff(&mut self, other: &Self) -> Result<(), MergeError> {
+    fn diff(&mut self, other: &Self, ignore: IgnoreError) -> Result<(), MergeError> {
         if let Some(start_line) = other.start_line.as_ref() {
             if let Some(my_start_line) = self.start_line.as_ref() {
+                // if start_line != my_start_line then ignore the function
                 if start_line != my_start_line {
-                    return Err(MergeError::UnmatchedFunctionLine);
+                    if ignore.ignore_unmatched_line_error {
+                        self.count = 0;
+                    } else {
+                        return Err(MergeError::UnmatchedFunctionLine);
+                    }
                 }
             }
         }
@@ -66,7 +89,7 @@ impl Diff for FunctionValue {
 }
 
 impl Diff for LineValue {
-    fn diff(&mut self, other: &Self) -> Result<(), MergeError> {
+    fn diff(&mut self, other: &Self, ignore: IgnoreError) -> Result<(), MergeError> {
         if let Some(checksum) = other.checksum.as_ref() {
             if let Some(my_checksum) = self.checksum.as_ref() {
                 if checksum != my_checksum {
@@ -87,11 +110,11 @@ where
     K: Ord + Clone,
     V: Diff,
 {
-    fn diff(&mut self, other: &Self) -> Result<(), MergeError> {
+    fn diff(&mut self, other: &Self, ignore: IgnoreError) -> Result<(), MergeError> {
         for (key, value) in other {
             match self.entry(key.clone()) {
                 Entry::Vacant(_) => {}
-                Entry::Occupied(mut e) => e.get_mut().diff(value)?,
+                Entry::Occupied(mut e) => e.get_mut().diff(value, ignore)?,
             }
         }
         Ok(())
@@ -176,7 +199,15 @@ end_of_record
 
         let expected_report = Report::from_reader(Reader::new(expected_lcov.as_bytes())).unwrap();
 
-        let diff_rep = diff_reports(&report2, &report1).unwrap();
+        let ignore = super::IgnoreError {
+            ignore_unmatched_line_error: false,
+        };
+
+        let post_process_options = super::PostProcessOptions {
+            drop_zeros: false,
+        };
+
+        let diff_rep = diff_reports(&report2, &report1, ignore, post_process_options).unwrap();
 
         for pair in diff_rep.into_records().zip(expected_report.into_records()) {
             assert_eq!(pair.0, pair.1)

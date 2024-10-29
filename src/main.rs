@@ -1,4 +1,4 @@
-use lcov_diff::diff_reports;
+use lcov_diff::{diff_reports, IgnoreError, PostProcessOptions};
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -46,6 +46,14 @@ struct Cli {
         max_values = 2
     )]
     files: Vec<PathBuf>,
+
+    #[structopt(short = "i", long = "ignore-unmatched-function-line")]
+    ignore_unmatched_function_line: bool,
+
+
+    // post_process_drop_zeros: bool,
+    #[structopt(short = "z", long = "drop-zeros")]
+    drop_zeros: bool,
 }
 
 fn genhtml<P: AsRef<Path>>(lcov_path: P, report_dir: &str) -> bool {
@@ -81,9 +89,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Processing diff for two lcov files: {:?}", options.files);
 
+    let ignore = IgnoreError {
+        ignore_unmatched_line_error: options.ignore_unmatched_function_line,
+    };
+
+    let post_process_options = PostProcessOptions {
+        drop_zeros: options.drop_zeros,
+    };
+
     let report = diff_reports(
         &Report::from_file(options.files[0].as_path())?,
         &Report::from_file(options.files[1].as_path())?,
+        ignore,
+        post_process_options
     )?;
 
     match &options.output {

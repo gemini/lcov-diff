@@ -93,3 +93,5 @@ Cargo.lock
 .idea/
 
 # End of https://www.toptal.com/developers/gitignore/api/vscode,rust,emacs,linux
+
+*.info
